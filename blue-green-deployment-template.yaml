@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template for a multi-AZ VPC setup with private and public subnets, an Internet Gateway, a NAT Gateway, and ECS Fargate deployment.
+Description: CloudFormation template for a multi-AZ VPC setup with private and public subnets, an Internet Gateway, a NAT Gateway, and ECS Fargate deployment with Blue/Green deployment.
 
 Parameters:
   # VPC Parameters
@@ -53,7 +53,7 @@ Parameters:
   
   DockerImage:
     Type: String
-    Default: public.ecr.aws/p6l0u1j8/week5app:image-viewing-app
+    Default: public.ecr.aws/p2l9n5r2/week5-repo:danielkwadwosah_week5nodeapp
     Description: Docker image to deploy
   
   ContainerPort:
@@ -97,6 +97,20 @@ Parameters:
     Type: String
     Default: myapp-bucket
     Description: Suffix for the S3 bucket name
+
+  # Blue/Green Deployment Parameters
+  DeploymentType:
+    Type: String
+    Default: BLUE_GREEN
+    AllowedValues:
+      - BLUE_GREEN
+      - ROLLING_UPDATE
+    Description: Type of deployment to use (BLUE_GREEN or ROLLING_UPDATE)
+  
+  DeploymentConfigTerminationTimeout:
+    Type: Number
+    Default: 300
+    Description: Timeout in seconds for the termination of the original task set
 
 Resources:
   # VPC and Networking Resources
@@ -283,10 +297,11 @@ Resources:
       Scheme: internet-facing
       Type: application
 
-  AppTargetGroup:
+  # Production Target Group
+  ProdTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${AppName}-TargetGroup
+      Name: !Sub ${AppName}-Prod-TG
       Port: !Ref ContainerPort
       Protocol: HTTP
       TargetType: ip
@@ -299,19 +314,53 @@ Resources:
       UnhealthyThresholdCount: 2
       Tags:
         - Key: Name
-          Value: !Sub ${AppName}-TargetGroup
+          Value: !Sub ${AppName}-Prod-TG
 
-  ALBListener:
+  # Test Target Group for Blue/Green deployments
+  TestTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AppName}-Test-TG
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref LabVPC
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppName}-Test-TG
+
+  # Main Production Listener
+  ProdListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     DependsOn:
       - AppLoadBalancer
-      - AppTargetGroup
+      - ProdTargetGroup
     Properties:
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref AppTargetGroup
+          TargetGroupArn: !Ref ProdTargetGroup
       LoadBalancerArn: !Ref AppLoadBalancer
       Port: 80
+      Protocol: HTTP
+
+  # Test Listener for Blue/Green deployments
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - AppLoadBalancer
+      - TestTargetGroup
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TestTargetGroup
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 5000
       Protocol: HTTP
 
   # ECS Resources
@@ -319,6 +368,61 @@ Resources:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Ref ECSClusterName
+
+  # CodeDeploy resources for Blue/Green deployment
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppName}-CodeDeployServiceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub ${AppName}-BlueGreenApp
+      ComputePlatform: ECS
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn:
+      - CodeDeployApplication
+      - ECSService
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub ${AppName}-BlueGreenDG
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: !Ref DeploymentConfigTerminationTimeout
+      ECSServices:
+        - ClusterName: !Ref ECSCluster
+          ServiceName: !GetAtt ECSService.Name
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !Ref ProdListener
+            TestTrafficRoute:
+              ListenerArns:
+                - !Ref TestListener
+            TargetGroups:
+              - Name: !GetAtt ProdTargetGroup.TargetGroupName
+              - Name: !GetAtt TestTargetGroup.TargetGroupName
 
   # IAM Roles
   ECSExecutionRole:
@@ -432,10 +536,8 @@ Resources:
           Secrets:
             - Name: AWS_ACCESS_KEY_ID
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/access_key_id
-            - Name: AWS_SECRET_KEY_ID
-              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/secret_key_id
-            - Name: PORT
-              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/port
+            - Name: AWS_SECRET_ACCESS_KEY
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/secret_access_key
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -449,7 +551,7 @@ Resources:
     DependsOn:
       - ECSCluster
       - ECSTaskDefinition
-      - ALBListener
+      - ProdListener
     Properties:
       Cluster: !Ref ECSCluster
       ServiceName: !Sub ${AppName}-Service
@@ -467,7 +569,9 @@ Resources:
       LoadBalancers:
         - ContainerName: !Sub ${AppName}-Container
           ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref AppTargetGroup
+          TargetGroupArn: !Ref ProdTargetGroup
+      DeploymentController:
+        Type: CODE_DEPLOY
 
   # Auto Scaling
   ECSAutoScalingTarget:
@@ -501,9 +605,24 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${S3BucketNameSuffix}-${AWS::AccountId}
-      AccessControl: Private
-      VersioningConfiguration:
-        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
 
   S3BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -523,7 +642,7 @@ Resources:
               - s3:ListBucket
             Resource:
               - !GetAtt AppS3Bucket.Arn
-              - !Sub ${AppS3Bucket.Arn}/*
+              - !Sub ${AppS3Bucket.Arn}/uploads/*
 
 Outputs:
   VPCID:
@@ -550,6 +669,14 @@ Outputs:
     Description: DNS name of the Application Load Balancer
     Value: !GetAtt AppLoadBalancer.DNSName
 
+  ProdTargetGroupArn:
+    Description: ARN of the Production Target Group
+    Value: !Ref ProdTargetGroup
+
+  TestTargetGroupArn:
+    Description: ARN of the Test Target Group
+    Value: !Ref TestTargetGroup
+
   ECSClusterName:
     Value: !Ref ECSCluster
     Description: Name of the ECS Cluster
@@ -569,3 +696,11 @@ Outputs:
   S3BucketURL:
     Value: !Sub https://${AppS3Bucket}.s3.amazonaws.com
     Description: URL of the S3 Bucket
+
+  CodeDeployApplicationName:
+    Value: !Ref CodeDeployApplication
+    Description: Name of the CodeDeploy Application
+
+  CodeDeployDeploymentGroupName:
+    Value: !Ref CodeDeployDeploymentGroup
+    Description: Name of the CodeDeploy Deployment Group
