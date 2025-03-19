@@ -432,7 +432,7 @@ Resources:
           Secrets:
             - Name: AWS_ACCESS_KEY_ID
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/access_key_id
-            - Name: AWS_SECRET_ACCESS_KEY
+            - Name: AWS_SECRET_KEY_ID
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/secret_key_id
             - Name: PORT
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/port
