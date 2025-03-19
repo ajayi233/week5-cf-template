@@ -53,7 +53,7 @@ Parameters:
   
   DockerImage:
     Type: String
-    Default: public.ecr.aws/p2l9n5r2/week5-repo:danielkwadwosah_week5nodeapp
+    Default: public.ecr.aws/p6l0u1j8/week5app:image-viewing-app
     Description: Docker image to deploy
   
   ContainerPort:
@@ -97,12 +97,6 @@ Parameters:
     Type: String
     Default: myapp-bucket
     Description: Suffix for the S3 bucket name
-
-  # # Parameter Store Path
-  # ParameterStorePath:
-  #   Type: String
-  #   Default: arn:aws:ssm:us-east-1:863518454104:parameter/
-  #   Description: Path prefix for parameters in Parameter Store
 
 Resources:
   # VPC and Networking Resources
@@ -390,7 +384,7 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - !GetAtt AppS3Bucket.Arn
-                  - !Sub ${AppS3Bucket.Arn}/*
+                  - !Sub ${AppS3Bucket.Arn}/uploads/*
 
   ECSAutoScalingRole:
     Type: AWS::IAM::Role
@@ -439,7 +433,9 @@ Resources:
             - Name: AWS_ACCESS_KEY_ID
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/access_key_id
             - Name: AWS_SECRET_ACCESS_KEY
-              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/secret_access_key
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/secret_key_id
+            - Name: PORT
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/port
           LogConfiguration:
             LogDriver: awslogs
             Options:
