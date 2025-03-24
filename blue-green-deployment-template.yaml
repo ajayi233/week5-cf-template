@@ -109,7 +109,7 @@ Parameters:
   
   DeploymentConfigTerminationTimeout:
     Type: Number
-    Default: 300
+    Default: 5
     Description: Timeout in seconds for the termination of the original task set
 
 Resources:
